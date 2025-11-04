@@ -1,0 +1,60 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Helper functions for checking roles in Firestore
+    // Note: for storage rules, the path to the database is always /databases/(default)/documents
+    function getUserRole(roleName, appId) {
+      return get(/databases/(default)/documents/artifacts/$(appId)/public/data/roles/$(request.auth.uid)).data[roleName] == true;
+    }
+    function isAdmin(appId) {
+      // You can define specific app IDs for emulator/production
+      // Here, we check for both the production App ID and the emulator App ID
+      // This is a common pattern to avoid duplicating rules for different app IDs.
+      let validAppId = (appId == '1:1023984160721:web:0a89f18a92a259e8b1af0' || appId == 'emulator-app-id');
+      return validAppId && getUserRole('isAdmin', appId);
+    }
+    function isSupervisor(appId) {
+      let validAppId = (appId == '1:1023984160721:web:0a89f18a92a259e8b1af0' || appId == 'emulator-app-id');
+      return validAppId && getUserRole('isSupervisor', appId);
+    }
+
+    // --- DEFAULT SECURITY: NO ONE CAN READ/WRITE UNLESS EXPLICITLY ALLOWED BELOW ---
+    // This is a secure baseline. If no other rule matches, access is denied.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    // --- RULES FOR RECEIPTS UPLOAD AND ACCESS ---
+    // Path: /receipts/{appId}/{userId}/{reportId}/{fileName}
+    // Examples:
+    // /receipts/1:1023984160721:web:0a89f18a92a259e8b1af0/UserUID123/KLM-REPORT456/receipt1.jpg
+    // /receipts/emulator-app-id/UserUIDTEST/KLM-REPORTXYZ/invoice.png
+    match /receipts/{appId}/{userId}/{reportId}/{fileName} {
+      // Allow creation/upload of files (write permission)
+      // Only if an authenticated user is uploading to their own user ID folder,
+      // and the appId matches one of the recognized app IDs.
+      allow write: if request.auth != null &&
+                      request.auth.uid == userId &&
+                      (appId == '1:1023984160721:web:0a89f18a92a259e8b1af0' || appId == 'emulator-app-id');
+
+      // Allow reading/downloading of files (read permission)
+      // Only if:
+      // 1. The user is authenticated AND
+      // 2. (They are reading their own receipt OR they are an Admin OR they are a Supervisor)
+      // AND the appId matches one of the recognized app IDs.
+      allow read: if request.auth != null &&
+                      (appId == '1:1023984160721:web:0a89f18a92a259e8b1af0' || appId == 'emulator-app-id') &&
+                      (request.auth.uid == userId ||
+                       isAdmin(appId) ||
+                       isSupervisor(appId));
+    }
+
+    // --- Add more specific match blocks for other files (if any) here ---
+    // Example: allow read if authenticated for profile pictures
+    // match /profilePictures/{userId}/{fileName} {
+    //   allow read: if request.auth != null;
+    //   allow write: if request.auth != null && request.auth.uid == userId;
+    // }
+  }
+}

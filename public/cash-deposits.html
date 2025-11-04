@@ -1,0 +1,87 @@
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Cash Deposits</title>
+    
+        <script src="https://cdn.tailwindcss.com"></script>
+        <script>
+            tailwind.config = {
+                theme: {
+                    extend: {
+                        fontFamily: {
+                            sans: ['Inter', 'sans-serif'],
+                        },
+                        colors: {
+                            // Custom Deep Purple
+                            'primary-purple': '#7E22CE', 
+                        }
+                    }
+                }
+            }
+        </script>    
+
+    </head>
+    <body>
+        <header>
+            <h1>Cash Deposits Page</h1>
+        <!-- Add this navigation bar at the top of your <body> -->
+            <nav class="bg-primary-purple p-4 shadow-lg text-white flex justify-center space-x-6 mb-8 rounded-b-lg">
+                <a href="/" class="text-white hover:text-gray-200 text-lg font-semibold transition duration-150 ease-in-out">Home</a>
+                <a href="/reimbursement-hub" class="text-white hover:text-gray-200 text-lg font-semibold transition duration-150 ease-in-out">Reimbursement Hub</a>
+                <a href="/cash-deposits" class="text-white hover:text-gray-200 text-lg font-semibold transition duration-150 ease-in-out">Cash Deposits</a>
+            </nav>
+        </header>
+
+        <main>
+            <p>Here you can manage cash deposits.</p>
+            <button id="openVoucherModal">Create Expenditure Voucher</button>
+
+            <!-- The Expenditure Voucher Modal HTML with Tailwind -->
+            <div id="expenditureVoucherModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50" style="display: none;">
+                <div class="bg-white p-6 rounded-lg shadow-xl w-full max-w-md mx-auto relative">
+                    <span class="absolute top-2 right-4 text-gray-500 text-3xl cursor-pointer hover:text-gray-800" onclick="document.getElementById('expenditureVoucherModal').style.display='none';">&times;</span>
+                    <h2 class="text-2xl font-bold mb-4 text-primary-purple">Expenditure Voucher</h2>
+                    <form class="space-y-4">
+                        <div>
+                            <label for="amount" class="block text-sm font-medium text-gray-700">Amount:</label>
+                            <input type="number" id="amount" name="amount" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 p-2">
+                        </div>
+                        <div>
+                            <label for="description" class="block text-sm font-medium text-gray-700">Description:</label>
+                            <textarea id="description" name="description" rows="4" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 p-2"></textarea>
+                        </div>
+                        <button type="submit" class="w-full bg-primary-purple text-white py-2 px-4 rounded-md hover:bg-primary-purple/90 focus:outline-none focus:ring-2 focus:ring-primary-purple focus:ring-opacity-75">Submit Voucher</button>
+                    </form>
+                </div>
+            </div>
+        </main>
+
+        <footer>
+            <p>&copy; Your Company</p>
+        </footer>
+
+        <script>
+            // These are simple instructions for the browser to make the pop-up appear/disappear
+            const modal = document.getElementById('expenditureVoucherModal');
+            const openBtn = document.getElementById('openVoucherModal');
+            const closeBtn = modal.querySelector('.close-button');
+
+            openBtn.onclick = function() {
+                modal.style.display = 'block'; // Show the pop-up
+            }
+
+            closeBtn.onclick = function() {
+                modal.style.display = 'none'; // Hide the pop-up
+            }
+
+            // If you click outside the pop-up, it will also close
+            window.onclick = function(event) {
+                if (event.target == modal) {
+                    modal.style.display = 'none';
+                }
+            }
+        </script>
+    </body>
+    </html>

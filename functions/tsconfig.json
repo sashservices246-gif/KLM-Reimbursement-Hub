@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "module": "CommonJS",                  /* Specify module code generation: 'None', 'CommonJS', 'AMD', 'System', 'UMD', 'ES6', 'ES2015', 'ES2020', 'ES2022', 'ESNext', 'Node16', or 'NodeNext'. */
+    "target": "ES2022",                    /* Specify ECMAScript target version: 'ES3' (default), 'ES5', 'ES2015', 'ES2016', 'ES2017', 'ES2018', 'ES2019', 'ES2020', 'ES2021', 'ES2022', 'ESNext'. */
+    "lib": ["ES2022"],                     /* Specify library files to be included in the compilation. */
+    "outDir": "lib",                       /* Redirect output structure to the directory. */
+    "rootDir": "src",                      /* Specify the root directory of input files. Use to control the output directory structure with --outDir. */
+    "strict": true,                        /* Enable all strict type-checking options. */
+    "esModuleInterop": true,               /* Emit additional JavaScript to ease support for importing CommonJS modules. This enables 'allowSyntheticDefaultImports' for type compatibility. */
+    "skipLibCheck": true,                  /* Skip type checking all .d.ts files. */
+    "forceConsistentCasingInFileNames": true, /* Ensure that casing is correct in imports. */
+    "resolveJsonModule": true              /* Allows importing modules with a .json extension, which will be emitted as CommonJS modules. */
+  },
+  "compileOnSave": true,                   /* Compile all files in the project when changes are saved. */
+  "include": [
+    "src"
+  ]
+}

@@ -1,0 +1,1303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KLM Reimbursement Hub</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                    colors: {
+                        // Custom Deep Purple
+                        'primary-purple': '#7E22CE', 
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- Firebase Initialization and Setup -->
+    <script type="module">
+         // --- Firebase SDK Imports ---
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, connectAuthEmulator, OAuthProvider, signInWithPopup, signOut, setPersistence, browserLocalPersistence } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, setLogLevel, collection, doc, setDoc, getDoc, getDocs, query, addDoc, connectFirestoreEmulator } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAnalytics } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-analytics.js";
+        // NEW: Firebase Storage Imports
+        import { getStorage, ref, uploadBytesResumable, getDownloadURL, connectStorageEmulator } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-storage.js";
+
+
+        // --- Global Variables (Available to your other functions) ---
+        window.db = null;
+        window.auth = null;
+        window.userId = null;
+        window.analytics = null;
+        window.storage = null; // NEW: Global Storage variable
+        window.userRoles = { isAdmin: false, isSupervisor: false }; // Default roles
+        window.isApproverMode = false; // Global state for approver mode
+        let currentReportId = ''; // Global variable to hold the currently loaded/saved report ID
+
+        // --- NEW: Conditional appId based on environment ---
+        const isEmulatorEnvironment = window.location.hostname === "localhost";
+        if (isEmulatorEnvironment) {
+            window.appId = "emulator-app-id"; // Use a simplified ID for emulator to avoid parsing issues
+        } else {
+            window.appId = "1:1023984160721:web:0a89f18a92a259e8b1af0"; // Your actual Firebase App ID for production
+        }
+        // --- END NEW ---
+
+
+        // --- Helper Function: alertBox (Used by other functions) ---
+        function alertBox(type, title, message) {
+            const container = document.getElementById('alert-modal-container');
+            const modalTitle = document.getElementById('alert-title');
+            const modalMessage = document.getElementById('alert-message');
+            const modalButton = document.getElementById('alert-button');
+            const modalContent = modalButton.parentElement;
+
+            const typeClasses = {
+                success: { bg: 'bg-green-50', border: 'border-green-400', button: 'bg-green-500 hover:bg-green-600' },
+                error: { bg: 'bg-red-50', border: 'border-red-400', button: 'bg-red-500 hover:bg-red-600' },
+                info: { bg: 'bg-blue-50', border: 'border-blue-400', button: 'bg-primary-purple hover:bg-primary-purple/90' }
+            };
+            const classes = typeClasses[type] || typeClasses['info'];
+            
+            modalContent.className = `p-6 rounded-xl shadow-2xl w-full max-w-sm ${classes.bg} border-2 ${classes.border}`;
+            modalButton.className = `w-full text-white font-semibold py-2 px-4 rounded-lg transition duration-150 ${classes.button}`;
+            modalTitle.textContent = title;
+            modalMessage.textContent = message;
+            container.classList.remove('hidden');
+            modalButton.onclick = () => container.classList.add('hidden');
+        }
+
+        // --- Helper Function: updateUIAccess (Used by fetchUserRoles and onAuthStateChanged) ---
+        // Shows/hides UI elements based on the fetched user roles.
+        function updateUIAccess() {
+            // Role display
+            const rolesDisplay = document.getElementById('user-roles-display');
+            const yourRoles = [];
+            if (window.userRoles.isAdmin) yourRoles.push('Admin');
+            if (window.userRoles.isSupervisor) yourRoles.push('Supervisor');
+            if (rolesDisplay) { // Ensure rolesDisplay element exists before updating
+                rolesDisplay.textContent = yourRoles.length > 0 ? `Your Roles: ${yourRoles.join(', ')}` : 'Your Roles: Claimant';
+            }
+
+            // Admin Access Button
+            const adminButton = document.getElementById('admin-access-button');
+            if (adminButton) {
+                if (window.userRoles.isAdmin) {
+                    adminButton.classList.remove('hidden');
+                } else {
+                    adminButton.classList.add('hidden');
+                    // Hide panel if user is not admin
+                    const adminPanel = document.getElementById('admin-management-panel');
+                    if (adminPanel) adminPanel.classList.add('hidden');
+                }
+            }
+            
+            // Supervisor Access Button
+            const supervisorButton = document.getElementById('supervisor-access-button');
+            if (supervisorButton) {
+                if (window.userRoles.isSupervisor) {
+                    supervisorButton.classList.remove('hidden');
+                } else {
+                    supervisorButton.classList.add('hidden');
+                    const supervisorPanel = document.getElementById('supervisor-panel');
+                    if (supervisorPanel) supervisorPanel.classList.add('hidden');
+                }
+            }
+        }
+
+
+        // --- Helper Function: fetchUserRoles (Retrieves user roles from Firestore) ---
+        async function fetchUserRoles(uid) {
+            console.log(`[Roles] Fetching roles for UID: ${uid}...`);
+            const rolesDisplay = document.getElementById('user-roles-display');
+            if (rolesDisplay) rolesDisplay.textContent = 'Loading...';
+
+            try {
+                if (!window.db || !window.appId) {
+                    console.error("[Roles] Firestore DB or App ID not initialized.");
+                    return;
+                }
+                const rolesDocRef = doc(window.db, "artifacts", window.appId, "public", "data", "roles", uid);
+                const rolesSnap = await getDoc(rolesDocRef);
+
+                if (rolesSnap.exists()) {
+                    const data = rolesSnap.data();
+                    window.userRoles.isAdmin = data.isAdmin === true;
+                    window.userRoles.isSupervisor = data.isSupervisor === true;
+                    console.log("[Roles] User roles fetched:", window.userRoles);
+                } else {
+                    window.userRoles = { isAdmin: false, isSupervisor: false }; // Default to no roles if doc doesn't exist
+                    console.log("[Roles] No roles document found for user:", uid);
+                }
+            } catch (error) {
+                console.error("[Roles] Error fetching user roles:", error);
+                window.userRoles = { isAdmin: false, isSupervisor: false }; // Reset on error
+            } finally {
+                updateUIAccess(); // Update UI after roles are fetched
+            }
+        }
+
+
+        // --- Helper Function: grantRole (for Admin Panel) ---
+        window.grantRole = async function(targetUserId, role, shouldGrant) {
+            if (!window.userRoles.isAdmin) {
+                alertBox('error', 'Permission Denied', 'Only admins can manage user roles.');
+                return;
+            }
+            if (!targetUserId) {
+                alertBox('error', 'Invalid Input', 'Please provide a User ID.');
+                return;
+            }
+            
+            const roleRef = doc(window.db, 'artifacts', window.appId, 'public', 'data', 'roles', targetUserId);
+            const roleData = {};
+            if (role === 'admin') {
+                roleData.isAdmin = shouldGrant;
+            } else if (role === 'supervisor') {
+                roleData.isSupervisor = shouldGrant;
+            } else {
+                alertBox('error', 'Invalid Role', 'Unknown role specified.');
+                return;
+            }
+
+            try {
+                await setDoc(roleRef, roleData, { merge: true });
+                alertBox('success', 'Roles Updated', `Successfully updated roles for user ${targetUserId}.`);
+            } catch (error) {
+                console.error("Error updating roles:", error);
+                alertBox('error', 'Update Failed', 'An error occurred while updating roles.');
+            }
+        }
+
+        // --- NEW: Function to load and display all user roles for Admin ---
+        window.loadAllUserRoles = async function() {
+            const userRolesList = document.getElementById('all-user-roles-list');
+            if (!userRolesList) return;
+            userRolesList.innerHTML = '<li class="text-gray-500">Loading roles...</li>'; // Show loading state
+
+            if (!window.db || !window.appId) {
+                userRolesList.innerHTML = '<li class="text-red-500">Firebase not initialized.</li>';
+                return;
+            }
+
+            try {
+                const rolesCollectionRef = collection(window.db, 'artifacts', window.appId, 'public', 'data', 'roles');
+                const querySnapshot = await getDocs(rolesCollectionRef);
+                
+                userRolesList.innerHTML = ''; // Clear loading state
+
+                if (querySnapshot.empty) {
+                    userRolesList.innerHTML = '<li class="text-gray-600">No custom roles defined yet.</li>';
+                    return;
+                }
+
+                querySnapshot.forEach(docSnap => {
+                    const userId = docSnap.id;
+                    const roles = docSnap.data();
+                    let roleString = 'Claimant';
+                    if (roles.isAdmin && roles.isSupervisor) {
+                        roleString = 'Admin, Supervisor';
+                    } else if (roles.isAdmin) {
+                        roleString = 'Admin';
+                    } else if (roles.isSupervisor) {
+                        roleString = 'Supervisor';
+                    }
+
+                    const listItem = document.createElement('li');
+                    listItem.className = 'flex justify-between items-center py-2 border-b last:border-b-0 border-gray-200';
+                    listItem.innerHTML = `
+                        <span class="font-mono text-xs md:text-sm text-gray-800 break-all">${userId}</span>
+                        <span class="px-2 py-1 text-xs font-semibold rounded-md ${roleString.includes('Admin') ? 'bg-red-100 text-red-700' : (roleString.includes('Supervisor') ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700')}">
+                            ${roleString}
+                        </span>
+                    `;
+                    userRolesList.appendChild(listItem);
+                });
+
+            } catch (error) {
+                console.error("[Admin Roles] Error loading all user roles:", error);
+                userRolesList.innerHTML = `<li class="text-red-500">Error loading roles: ${error.message}</li>`;
+                // Crucial check: If the error is a permission denied, inform the admin explicitly
+                if (error.code === 'permission-denied') {
+                     alertBox('error', 'Permission Denied', 'You do not have permission to view all user roles. Ensure you are a deployed Admin.');
+                }
+            }
+        }        
+
+        // --- Core Application Logic (from your original code) ---
+        
+        // Helper to format currency with correct sign placement
+        function formatCurrency(amount) {
+            if (amount < 0) return `-$${Math.abs(amount).toFixed(2)}`;
+            return `$${amount.toFixed(2)}`;
+        }
+
+        // Determines the color class based on the net due amount
+        function getDueAmountColorClass(amount) {
+            if (amount > 0) return 'text-green-600'; // Due to Claimant
+            if (amount < 0) return 'text-red-600'; // Due to Church
+            return 'text-primary-purple'; // Zero balance
+        }
+
+        /**
+         * Toggles the ability to edit the authorization section for supervisors.
+         */
+        window.toggleApproverMode = function() {
+             if (!window.userRoles.isSupervisor) {
+                alertBox('error', 'Permission Denied', 'Only users with the Supervisor role can enter Approval Mode.');
+                return;
+            }
+            
+            window.isApproverMode = !window.isApproverMode;
+            const claimantInputs = document.querySelectorAll('#claimant-authorization input');
+            const approverInputs = document.querySelectorAll('#approver-authorization input');
+            const toggleButton = document.getElementById('approver-mode-toggle');
+            const statusIndicator = document.getElementById('mode-status');
+            
+            if (window.isApproverMode) {
+                // APPROVER MODE ON
+                claimantInputs.forEach(input => input.disabled = true);
+                approverInputs.forEach(input => input.disabled = false);
+                toggleButton.textContent = 'Exit Approval Mode';
+                toggleButton.classList.add('bg-primary-purple', 'text-white');
+                statusIndicator.textContent = 'Approval Mode Active';
+                statusIndicator.classList.add('text-green-600', 'font-bold');
+                document.getElementById('save-share-button').textContent = 'Approve & Save';
+            } else {
+                // CLAIMANT MODE ON (Default)
+                claimantInputs.forEach(input => input.disabled = false);
+                approverInputs.forEach(input => input.disabled = true);
+                toggleButton.textContent = 'Enter Approval Mode';
+                toggleButton.classList.remove('bg-primary-purple', 'text-white');
+                statusIndicator.textContent = 'Claimant Mode';
+                statusIndicator.classList.remove('text-green-600', 'font-bold');
+                 document.getElementById('save-share-button').textContent = 'Save & Share Report';
+            }
+        }
+        
+        /**
+         * Toggles the Admin management panel for users with the 'Admin' role.
+         */
+        window.toggleAdminPanel = function() {
+            if (!window.userRoles.isAdmin) {
+                alertBox('error', 'Permission Denied', 'This feature is for Admins only.');
+                return;
+            }
+            const panel = document.getElementById('admin-management-panel');
+            const button = document.getElementById('admin-access-button');
+
+            if (panel.classList.contains('hidden')) {
+                panel.classList.remove('hidden');
+                button.textContent = 'Hide Admin Panel';
+                button.classList.add('bg-gray-200');
+                window.loadAllReportsCount(); // Load count when panel is opened
+            } else {
+                panel.classList.add('hidden');
+                button.textContent = 'Admin Access';
+                button.classList.remove('bg-gray-200');
+            }
+        }
+
+        /**
+         * Toggles the Supervisor management panel for users with the 'Supervisor' role.
+         */
+        window.toggleSupervisorPanel = function() {
+            console.log("[DEBUG] toggleSupervisorPanel called."); // <-- ADD THIS LOG
+            if (!window.userRoles.isSupervisor) {
+                alertBox('error', 'Permission Denied', 'This feature is for Supervisors only.');
+                return;
+            }
+            const panel = document.getElementById('supervisor-panel');
+            if (!panel) {
+                console.error("[DEBUG] Error: 'supervisor-panel' element not found!"); // <-- ADD THIS LOG
+                alertBox('error', 'UI Error', 'Supervisor panel element not found. Please contact support.');
+                return;
+            }
+            const button = document.getElementById('supervisor-access-button');
+
+            if (panel.classList.contains('hidden')) {
+                console.log("[DEBUG] Showing supervisor panel."); // <-- ADD THIS LOG
+                panel.classList.remove('hidden');
+                if (button) button.textContent = 'Hide Approval Panel';
+                if (button) button.classList.add('bg-gray-200');
+            } else {
+                console.log("[DEBUG] Hiding supervisor panel."); // <-- ADD THIS LOG
+                panel.classList.add('hidden');
+                if (button) button.textContent = 'Leadership Approval';
+                if (button) button.classList.remove('bg-gray-200');
+            }
+        };
+
+        /**
+         * Toggles the receipt status indicator (Y/N column)
+         */
+        window.toggleReceiptStatus = function(button) {
+            const row = button.closest('.expense-row');
+            if (!row) return;
+            const statusSpan = row.querySelector('.receipt-status');
+            if (statusSpan.textContent === 'N') {
+                statusSpan.textContent = 'Y';
+                statusSpan.classList.remove('text-red-500', 'bg-red-100');
+                statusSpan.classList.add('text-green-600', 'bg-green-100');
+                button.textContent = 'Uploaded';
+                button.classList.add('bg-green-500', 'hover:bg-green-600', 'text-white');
+            } else {
+                statusSpan.textContent = 'N';
+                statusSpan.classList.remove('text-green-600', 'bg-green-100');
+                statusSpan.classList.add('text-red-500', 'bg-red-100');
+                 button.textContent = 'Upload';
+                button.classList.remove('bg-green-500', 'hover:bg-green-600', 'text-white');
+            }
+        }
+
+        window.addRow = function(expense = { date: '', vendor: '', description: '', category: '', class_code: '', amount: '', receipt_attached: 'N' }) {
+            const container = document.getElementById('expenses-container');
+            if (!container) return;
+            const newRow = document.createElement('div');
+            newRow.className = 'expense-row grid grid-cols-1 md:grid-cols-12 gap-3 mb-3 p-3 bg-white shadow rounded-lg items-center text-sm';
+            const isReceiptAttached = expense.receipt_attached === 'Y';
+            newRow.innerHTML = `
+                <div class="hidden">
+                    <input type="text" value="${expense.category}" class="category-input">
+                    <input type="text" value="${expense.class_code}" class="class-input">
+                    <input type="hidden" value="${expense.receipt_url || ''}" class="receipt-url-input"> <!-- NEW: Hidden input for receipt URL -->
+                </div>
+                <div class="md:col-span-2"><input type="date" value="${expense.date}" class="date-input w-full p-2 border border-gray-300 rounded-lg" oninput="window.updateSummary()"></div>
+                <div class="md:col-span-3"><input type="text" placeholder="Vendor" value="${expense.vendor}" class="vendor-input w-full p-2 border border-gray-300 rounded-lg"></div>
+                <div class="md:col-span-2"><input type="text" placeholder="Purpose" value="${expense.description}" class="description-input w-full p-2 border border-gray-300 rounded-lg"></div>
+                <div class="md:col-span-2 text-center"><input type="number" step="0.01" placeholder="0.00" value="${expense.amount}" class="amount-input w-full p-2 border border-gray-300 rounded-lg font-mono text-right" oninput="window.updateSummary()"></div>
+                
+                <!-- NEW RECEIPT UPLOAD SECTION -->
+                <div class="md:col-span-2 flex flex-col items-center justify-center space-y-1">
+                    <input type="file" class="receipt-file-input hidden" accept="image/*,.pdf" onchange="window.handleFileSelect(this)">
+                    <button type="button" onclick="this.previousElementSibling.click()" class="bg-blue-500 hover:bg-blue-600 text-white p-2 rounded-lg shadow-md text-xs font-semibold w-full">Choose File</button>
+                    <span class="file-name-display text-xs text-gray-600 truncate w-full text-center">${expense.receipt_url ? 'File Chosen' : 'No file chosen'}</span>
+                    <progress class="upload-progress w-full h-1 hidden"></progress>
+                </div>
+                
+                <div class="md:col-span-1 flex items-center justify-center space-x-2">
+                    <a href="${expense.receipt_url || '#'}" target="_blank" class="view-receipt-button bg-green-500 hover:bg-green-600 text-white p-2 rounded-lg shadow-md text-xs font-semibold ${expense.receipt_url ? '' : 'hidden'}" title="View Receipt">View</a>
+                    <button onclick="window.removeRow(this)" class="remove-button bg-red-500 hover:bg-red-600 text-white p-2 rounded-lg shadow-md" title="Remove row"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4"><path fill-rule="evenodd" d="M8.75 1A2.75 2.75 0 0 0 6 3.75v.5H2.75a.75.75 0 0 0 0 1.5h14.5a.75.75 0 0 0 0-1.5H14v-.5A2.75 2.75 0 0 0 11.25 1h-2.5ZM10 6a.75.75 0 0 1 .75.75v7.5a.75.75 0 0 1-1.5 0v-7.5A.75.75 0 0 1 10 6ZM6.75 10.25a.75.75 0 0 0-1.5 0v3a.75.75 0 0 0 1.5 0v-3Z" clip-rule="evenodd" /></svg></button>
+                </div>`;
+            container.appendChild(newRow);
+            updateSummary();
+        }
+
+        window.removeRow = function(button) {
+            button.closest('.expense-row')?.remove();
+            updateSummary();
+        }
+
+        window.clearForm = function() {
+            document.getElementById('reimbursement-form').reset();
+            document.getElementById('expenses-container').innerHTML = '';
+            document.getElementById('submission-date-input').value = new Date().toISOString().slice(0, 10);
+            window.addRow();
+            const idDisplay = document.getElementById('report-id-display');
+            idDisplay.textContent = 'No active report loaded.';
+            idDisplay.classList.remove('bg-green-100', 'font-mono');
+            currentReportId = `KLM-TEMP-${Date.now()}`; // TEMPORARY ID FOR UPLOADS
+            console.log("[DEBUG] currentReportId set to:", currentReportId); // <--- ADD THIS LINE
+            document.getElementById('single-export-button').classList.add('hidden');
+            if (window.isApproverMode) {
+                window.toggleApproverMode(); // Toggle back to claimant mode
+            }
+        }
+        
+        window.populateForm = function(reportData, reportId) {
+            window.clearForm();
+            document.getElementById('claimant-name-input').value = reportData.claimantInfo.name;
+            document.getElementById('email-input').value = reportData.claimantInfo.email;
+            document.getElementById('claim-period-input').value = reportData.claimantInfo.period;
+            document.getElementById('submission-date-input').value = reportData.claimantInfo.submitted;
+            const container = document.getElementById('expenses-container');
+            container.innerHTML = '';
+            reportData.expenses.forEach(expense => window.addRow(expense));
+            updateSummary();
+            document.getElementById('claimant-signature').value = reportData.authorization.claimantSignature;
+            document.getElementById('claimant-auth-date').value = reportData.authorization.claimantAuthDate;
+            document.getElementById('approver-signature').value = reportData.authorization.approverSignature;
+            document.getElementById('approver-auth-date').value = reportData.authorization.approverAuthDate;
+            currentReportId = reportId;
+            const idDisplay = document.getElementById('report-id-display');
+            idDisplay.textContent = `Report ID: ${reportId} (Loaded)`;
+            idDisplay.classList.add('bg-green-100', 'font-mono');
+            if (window.userRoles.isAdmin) {
+                document.getElementById('single-export-button').classList.remove('hidden');
+            }
+            console.log(`Form loaded successfully for Report ID: ${reportId}`);
+        }
+
+        window.loadReportById = async function() {
+            if (!window.db || !window.appId) return alertBox('error', 'Connection Error', 'Firebase not initialized.');
+            const loadInput = document.getElementById('report-id-load-input');
+            const reportId = loadInput.value.trim().toUpperCase();
+            if (!reportId || !reportId.startsWith('KLM-')) return alertBox('error', 'Invalid ID', 'Please enter a valid report ID starting with "KLM-".');
+            
+            const loadBtn = document.getElementById('load-report-button');
+            loadBtn.textContent = 'Loading...';
+            loadBtn.disabled = true;
+            const reportRef = doc(window.db, 'artifacts', window.appId, 'public', 'data', 'reports', reportId);
+            try {
+                const docSnap = await getDoc(reportRef);
+                if (docSnap.exists()) {
+                    // Check if current user is allowed to read this report
+                    if (window.userId !== docSnap.data().submittedByUserId && !window.userRoles.isSupervisor && !window.userRoles.isAdmin) {
+                        alertBox('error', 'Permission Denied', 'You do not have permission to view this report.');
+                        return;
+                    }
+                    window.populateForm(docSnap.data(), reportId);
+                    alertBox('success', 'Report Loaded', `Claim ${reportId} successfully loaded.`);
+                    loadInput.value = '';
+                } else {
+                    alertBox('error', 'Not Found', `No report found with ID: ${reportId}`);
+                }
+            } catch (e) {
+                console.error("Error loading document: ", e);
+                alertBox('error', 'Load Error', 'An error occurred while fetching the report.');
+            } finally {
+                loadBtn.textContent = 'Load Report';
+                loadBtn.disabled = false;
+            }
+        }
+
+        function gatherFormData() {
+            const totals = calculateTotals();
+            
+            // Get current values from the form inputs
+            const claimantSignatureInput = document.getElementById('claimant-signature');
+            const claimantAuthDateInput = document.getElementById('claimant-auth-date');
+            const approverSignatureInput = document.getElementById('approver-signature');
+            const approverAuthDateInput = document.getElementById('approver-auth-date');
+
+            let claimantSignature = claimantSignatureInput?.value || '';
+            let claimantAuthDate = claimantAuthDateInput?.value || '';
+            let approverSignature = approverSignatureInput?.value || '';
+            let approverAuthDate = approverAuthDateInput?.value || '';
+
+            // Automatically fill claimantAuthDate if signature is present but date is empty
+            if (claimantSignature && !claimantAuthDate) {
+                const today = new Date();
+                const year = today.getFullYear();
+                const month = String(today.getMonth() + 1).padStart(2, '0'); // Months are 0-indexed
+                const day = String(today.getDate()).padStart(2, '0');
+                claimantAuthDate = `${year}-${month}-${day}`;
+                // Optionally update the UI input field as well for visual feedback
+                if (claimantAuthDateInput) claimantAuthDateInput.value = claimantAuthDate;
+            }
+
+            // Automatically fill approverAuthDate if signature is present but date is empty
+            // This applies when an approver signs in "Approval Mode" but doesn't manually set the date.
+            if (approverSignature && !approverAuthDate) {
+                const today = new Date();
+                const year = today.getFullYear();
+                const month = String(today.getMonth() + 1).padStart(2, '0');
+                const day = String(today.getDate()).padStart(2, '0');
+                approverAuthDate = `${year}-${month}-${day}`;
+                // Optionally update the UI input field as well for visual feedback
+                if (approverAuthDateInput) approverAuthDateInput.value = approverAuthDate;
+            }
+
+            return {
+                claimantInfo: {
+                    name: document.getElementById('claimant-name-input')?.value || 'N/A',
+                    email: document.getElementById('email-input')?.value || 'N/A',
+                    period: document.getElementById('claim-period-input')?.value || 'N/A',
+                    submitted: document.getElementById('submission-date-input')?.value || new Date().toISOString().slice(0, 10)
+                },
+                expenses: getExpenseData(),
+                totals: totals,
+                amount: totals.totalExpenses,
+                description: `Report for ${document.getElementById('claimant-name-input')?.value || 'N/A'} - ${document.getElementById('claim-period-input')?.value || 'N/A'}`,
+                authorization: {
+                    claimantSignature: claimantSignature,
+                    claimantAuthDate: claimantAuthDate,
+                    approverSignature: approverSignature,
+                    approverAuthDate: approverAuthDate
+                },
+                submittedByUserId: window.userId,
+                timestamp: Date.now()
+            };
+        }
+
+        window.saveAndShareReport = async function() {
+             console.log("[SAVE] saveAndShareReport function called.");
+            if (!window.db || !window.appId) {
+        	console.error("[SAVE] Firebase not initialized. window.db or window.appId is missing."); 
+		return alertBox('error', 'Save Failed', 'Firebase not initialized. Cannot save report.');
+            }
+            if (!window.userId) {
+       		console.error("[SAVE] User not authenticated. window.userId is missing.");
+		return alertBox('error', 'Save Failed', 'User not authenticated. Please refresh or try signing in.');
+            }
+
+            console.log("[SAVE] Passed initial checks. Gathering form data...");
+
+            const reportData = gatherFormData();
+            
+            // Logic to determine the final report ID
+            let finalReportId;
+            let isNewReport = false;
+            let tempReportIdForMove = '';
+            if (currentReportId.startsWith('KLM-TEMP-') || currentReportId === '') {
+                finalReportId = `KLM-${Date.now()}`; // Generate a permanent ID
+                isNewReport = true;
+                if (currentReportId.startsWith('KLM-TEMP-')) {
+                    tempReportIdForMove = currentReportId; // Store the temporary ID that's being replaced
+                }
+            } else {
+                finalReportId = currentReportId; // Use the existing loaded ID
+            }
+            
+            // CORRECTED LINE: Using finalReportId here
+            const reportRef = doc(window.db, 'artifacts', window.appId, 'public', 'data', 'reports', finalReportId);
+            const saveBtn = document.getElementById('save-share-button');
+
+            try {
+                saveBtn.textContent = 'Saving...';
+                saveBtn.disabled = true;
+
+                const dataToSave = { ...reportData }; // Create a copy of reportData
+
+                // ONLY if we are transitioning from a temporary ID to a permanent one,
+                // add the oldTemporaryReportId field to the document for the Cloud Function.
+                if (tempReportIdForMove) {
+                    dataToSave.oldTemporaryReportId = tempReportIdForMove;
+                }
+
+                // --- ADD THESE NEW CONSOLE.LOGS ---
+                console.log("DEBUG: currentReportId at start of save:", currentReportId);
+                console.log("DEBUG: tempReportIdForMove being considered:", tempReportIdForMove);
+                console.log("DEBUG: dataToSave before setDoc:", dataToSave);
+                // ----------------------------------
+
+                await setDoc(reportRef, dataToSave);
+                console.log("Report document saved successfully.");
+
+                currentReportId = finalReportId; // Ensure currentReportId is now the final one
+                const idDisplay = document.getElementById('report-id-display');
+                idDisplay.textContent = `Report ID: ${finalReportId} (Saved)`; // Display the final ID
+                idDisplay.classList.add('bg-green-100', 'font-mono');
+                saveBtn.textContent = window.isApproverMode ? 'Approved & Saved!' : 'Saved!';
+                
+                // CORRECTED LINE: Using finalReportId here (this was the previous error you hit)
+                alertBox('success', window.isApproverMode ? 'Report Approved!' : 'Report Saved!', `Your report is saved with ID: ${finalReportId}.`);
+            } catch (e) {
+                console.error("Error saving document: ", e);
+                saveBtn.textContent = 'Save Failed!';
+                alertBox('error', 'Save Error', 'An error occurred while saving the report.');
+            } finally {
+                setTimeout(() => {
+                    saveBtn.textContent = window.isApproverMode ? 'Approve & Save' : 'Save & Share Report';
+                    saveBtn.disabled = false;
+                }, 2000);
+            }
+        }
+        
+        function calculateTotals() {
+            let totalExpenses = 0, totalAdvance = 0;
+            document.querySelectorAll('#expenses-container .expense-row .amount-input').forEach(input => {
+                const amount = parseFloat(input.value) || 0;
+                if (amount > 0) totalExpenses += amount;
+                else totalAdvance += Math.abs(amount);
+            });
+            return { totalExpenses, totalAdvance, totalDue: totalExpenses - totalAdvance };
+        }
+
+        window.updateSummary = function() {
+            const { totalExpenses, totalAdvance, totalDue } = calculateTotals();
+            document.getElementById('total-amount-claimed').textContent = formatCurrency(totalExpenses);
+            document.getElementById('total-cash-advance-less').textContent = totalAdvance.toFixed(2);
+            const totalAmountDueEl = document.getElementById('total-amount-due');
+            totalAmountDueEl.textContent = formatCurrency(totalDue);
+            totalAmountDueEl.className = `text-2xl font-extrabold ${getDueAmountColorClass(totalDue)}`;
+        }
+
+        function getExpenseData() {
+            const expenses = [];
+            document.querySelectorAll('#expenses-container .expense-row').forEach(row => {
+                const amount = parseFloat(row.querySelector('.amount-input')?.value) || 0;
+                const vendor = row.querySelector('.vendor-input')?.value.trim() || '';
+                if (vendor || amount !== 0) {
+                    expenses.push({
+                        date: row.querySelector('.date-input')?.value || '',
+                        vendor: vendor,
+                        description: row.querySelector('.description-input')?.value.trim() || '',
+                        category: row.querySelector('.category-input')?.value.trim() || '', 
+                        class_code: row.querySelector('.class-input')?.value.trim() || '', 
+                        amount: amount,
+                        //OLD: receipt_attached: row.querySelector('.receipt-status')?.textContent || 'N',
+                        receipt_url: row.querySelector('.receipt-url-input')?.value || '' // NEW: Store the receipt URL
+                    });
+                }
+            });
+            return expenses;
+        }
+
+        window.exportSingleToCSV = function() {
+            if (!currentReportId) return alertBox('error', 'Export Failed', 'Please load a report first.');
+            const expenses = getExpenseData();
+            if (expenses.length === 0) return alertBox('error', 'Export Failed', 'No expense data found.');
+            const { totalExpenses, totalAdvance, totalDue } = calculateTotals();
+            let csv = `--- REPORT SUMMARY ---\nReport ID,"${currentReportId}"\nClaimant Name,"${document.getElementById('claimant-name-input').value}"\n\n--- EXPENSE DETAILS ---\nDate,Vendor,Purpose,Category,Class,Amount,Receipt\n`;
+            expenses.forEach(item => {
+                csv += `${item.date},"${item.vendor}","${item.description}","${item.category}","${item.class_code}",${item.amount.toFixed(2)},${item.receipt_attached}\n`;
+            });
+            csv += `\n--- FINANCIAL SUMMARY ---\nTOTAL EXPENSES,${totalExpenses.toFixed(2)}\nLESS: CASH ADVANCE,${totalAdvance.toFixed(2)}\nTOTAL DUE,${totalDue.toFixed(2)}\n`;
+            performDownload(csv, `${currentReportId}_SINGLE_EXPORT.csv`);
+        }
+
+        window.loadAllReportsAndExport = async function() {
+            if (!window.db || !window.appId) return alertBox('error', 'Export Failed', 'Firebase connection lost.');
+            const btn = document.getElementById('bulk-export-button');
+            btn.textContent = 'Fetching Data...';
+            btn.disabled = true;
+            const allExpenses = [];
+            const reportsRef = collection(window.db, 'artifacts', window.appId, 'public', 'data', 'reports');
+            try {
+                const snapshot = await getDocs(reportsRef);
+                if (snapshot.empty) return alertBox('info', 'No Claims Found', 'The database is empty.');
+                snapshot.forEach(doc => {
+                    const data = doc.data();
+                    (data.expenses || []).forEach(expense => {
+                        allExpenses.push({ 'Report ID': doc.id, 'Claimant Name': data.claimantInfo?.name, 'Submission Date': data.claimantInfo?.submitted, 'Is Approved': data.authorization?.approverSignature ? 'Y' : 'N', 'Expense Date': expense.date, 'Vendor': expense.vendor, 'Description': expense.description, 'Category': expense.category, 'Class Code': expense.class_code, 'Amount': expense.amount.toFixed(2), 'Receipt URL': expense.receipt_url || '' });
+                    });
+                });
+                if (allExpenses.length === 0) return alertBox('info', 'No Line Items', 'Claims found but contained no line items.');
+                performDownload(convertFlatArrayToCSV(allExpenses), `BULK_EXPORT_${new Date().toISOString().slice(0, 10)}.csv`);
+                alertBox('success', 'Bulk Export Complete', `${snapshot.size} claims successfully exported.`);
+            } catch (error) {
+                console.error("Bulk export error:", error);
+                alertBox('error', 'Export Error', 'An error occurred during bulk export.');
+            } finally {
+                btn.disabled = false;
+                window.loadAllReportsCount();
+            }
+        }
+        
+        function convertFlatArrayToCSV(data) {
+            if (data.length === 0) return '';
+            const headers = Object.keys(data[0]);
+            let csv = headers.map(h => `"${h}"`).join(',') + '\n';
+            data.forEach(row => {
+                csv += headers.map(header => `"${(row[header] || '').toString().replace(/"/g, '""')}"`).join(',') + '\n';
+            });
+            return csv;
+        }
+
+        function performDownload(csvContent, filename) {
+            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+            link.setAttribute('href', url);
+            link.setAttribute('download', filename);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        }
+        
+        window.loadAllReportsCount = async function() {
+            if (!window.db || !window.appId) return;
+            const countEl = document.getElementById('bulk-report-count');
+            countEl.textContent = 'Loading...';
+            try {
+                const snapshot = await getDocs(collection(window.db, 'artifacts', window.appId, 'public', 'data', 'reports'));
+                countEl.textContent = `${snapshot.size} Claims Available for Bulk Export`;
+                document.getElementById('bulk-export-button').textContent = `Download All Claims (${snapshot.size} Claims)`;
+            } catch (e) {
+                countEl.textContent = 'Error loading count.';
+            }
+        }
+
+        // --- NEW: Receipt Upload Functions ---
+
+        /**
+         * Initiates the file selection process and calls the upload handler.
+         * @param {HTMLInputElement} inputElement The file input element that triggered the change.
+         */
+        window.handleFileSelect = async function(inputElement) {
+            const file = inputElement.files[0];
+            if (!file) {
+                inputElement.closest('.expense-row').querySelector('.file-name-display').textContent = 'No file chosen';
+                return;
+            }
+
+            const expenseRow = inputElement.closest('.expense-row');
+            const fileNameDisplay = expenseRow.querySelector('.file-name-display');
+            
+            // Basic validation
+            if (!file.type.startsWith('image/') && file.type !== 'application/pdf') {
+                alertBox('error', 'Invalid File Type', 'Only images (JPG, PNG) and PDFs are allowed.');
+                inputElement.value = ''; // Clear file input
+                fileNameDisplay.textContent = 'Invalid file type';
+                return;
+            }
+            if (file.size > 5 * 1024 * 1024) { // 5MB limit
+                alertBox('error', 'File Too Large', 'File size cannot exceed 5MB.');
+                inputElement.value = ''; // Clear file input
+                fileNameDisplay.textContent = 'File too large';
+                return;
+            }
+
+            fileNameDisplay.textContent = `Uploading: ${file.name}`;
+            await window.uploadReceipt(file, expenseRow);
+        }
+
+        /**
+         * Uploads the selected file to Firebase Storage and updates Firestore.
+         * @param {File} file The file to upload.
+         * @param {HTMLElement} expenseRow The DOM element for the expense row.
+         */
+        window.uploadReceipt = async function(file, expenseRow) {
+            if (!window.auth.currentUser || !window.auth.currentUser.uid) {
+                alertBox('error', 'Authentication Required', 'Please sign in to upload receipts.');
+                return;
+            }
+            if (!window.storage) {
+                alertBox('error', 'Storage Not Initialized', 'Firebase Storage not initialized.');
+                return;
+            }
+            if (!window.db) {
+                alertBox('error', 'Database Not Initialized', 'Firestore not initialized.');
+                return;
+            }
+            // --- NEW LOGIC: Ensure a currentReportId exists for storage path ---
+            // If no report ID is active, generate a temporary one now.
+            if (!currentReportId || currentReportId === '') {
+                currentReportId = `KLM-TEMP-${Date.now()}`;
+                const idDisplay = document.getElementById('report-id-display');
+                if (idDisplay) {
+                    idDisplay.textContent = `Report ID: ${currentReportId} (Temporary)`;
+                    idDisplay.classList.add('bg-orange-100', 'font-mono', 'text-gray-700'); // Highlight temporary status
+                    idDisplay.classList.remove('bg-green-100'); // Remove saved style if present
+                }
+                alertBox('info', 'Temporary Report ID Assigned', `A temporary ID (${currentReportId}) has been assigned for your receipt upload. Remember to save your report when finished!`);
+            }
+            // --- END NEW LOGIC ---
+
+            const uid = window.auth.currentUser.uid;
+            const appId = window.appId;
+            const originalFileName = file.name;
+            const fileExtension = originalFileName.split('.').pop();
+            const uniqueFileName = `${Date.now()}_${uid}_${originalFileName.replace(/[^a-zA-Z0-9.]/g, '_')}`; // Sanitize filename
+
+            // Storage path: /receipts/{appId}/{userId}/{reportId}/{fileName}
+            const storagePath = `receipts/${appId}/${uid}/${currentReportId}/${uniqueFileName}`;
+            const storageRef = ref(window.storage, storagePath);
+
+            const uploadTask = uploadBytesResumable(storageRef, file);
+
+            const uploadProgressBar = expenseRow.querySelector('.upload-progress');
+            const fileNameDisplay = expenseRow.querySelector('.file-name-display');
+            const viewReceiptButton = expenseRow.querySelector('.view-receipt-button');
+            const receiptUrlInput = expenseRow.querySelector('.receipt-url-input');
+
+            uploadProgressBar.classList.remove('hidden');
+            fileNameDisplay.textContent = `Uploading: ${file.name}`;
+
+            try {
+                // Listen for state changes, errors, and completion of the upload.
+                uploadTask.on('state_changed',
+                    (snapshot) => {
+                        // Get task progress, including the number of bytes uploaded and the total number of bytes to be uploaded
+                        const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+                        uploadProgressBar.value = progress;
+                        fileNameDisplay.textContent = `Uploading: ${file.name} (${Math.round(progress)}%)`;
+                    },
+                    (error) => {
+                        // Handle unsuccessful uploads
+                        console.error("Upload failed:", error);
+                        alertBox('error', 'Upload Failed', `Error uploading ${file.name}: ${error.message}`);
+                        fileNameDisplay.textContent = `Upload failed: ${file.name}`;
+                        uploadProgressBar.classList.add('hidden');
+                        uploadProgressBar.value = 0;
+                    },
+                    async () => {
+                        // Handle successful uploads on complete
+                        fileNameDisplay.textContent = `Uploaded: ${file.name}`;
+                        uploadProgressBar.classList.add('hidden');
+                        uploadProgressBar.value = 0;
+
+                        // Get the public download URL
+                        const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
+                        console.log('File available at', downloadURL);
+
+                        // Store the download URL in the hidden input
+                        receiptUrlInput.value = downloadURL;
+                        viewReceiptButton.href = downloadURL;
+                        viewReceiptButton.classList.remove('hidden');
+
+                        alertBox('success', 'Upload Successful', `${file.name} uploaded!`);
+
+                        // Optionally, update the Firestore document for the current report with the URL
+                        // This might be better done when the *report itself* is saved,
+                        // by ensuring gatherFormData() pulls the receiptUrlInput.value
+                    }
+                );
+            } catch (error) {
+                console.error("Upload error:", error);
+                alertBox('error', 'Upload Error', `An error occurred during upload: ${error.message}`);
+                fileNameDisplay.textContent = `Upload failed: ${file.name}`;
+                uploadProgressBar.classList.add('hidden');
+                uploadProgressBar.value = 0;
+            }
+        }
+
+        // --- Core Firebase Initialization Function ---
+        async function initializeFirebase() {
+            const firebaseConfig = {
+              apiKey: "AIzaSyBlnPaTZPtYswZU-YT6IVU7vPr7apKRceI",
+              authDomain: "klm-reimbursement-hub.firebaseapp.com",
+              projectId: "klm-reimbursement-hub",
+              storageBucket: "klm-reimbursement-hub.firebasestorage.app",
+              messagingSenderId: "1023984160721",
+              appId: window.appId, // <--- IMPORTANT CHANGE: Now uses the dynamically determined window.appId
+              measurementId: "G-202SYPZEQM"
+            };
+
+            try {
+                const app = initializeApp(firebaseConfig);
+                
+                // --- Connect to Firebase Emulators if running on localhost ---
+                if (isEmulatorEnvironment) { // <--- Using the new isEmulatorEnvironment flag
+                    console.log("[Firebase Init] Connecting to Firebase Emulators...");
+                    const authInstanceForEmulator = getAuth(app); 
+                    connectAuthEmulator(authInstanceForEmulator, "http://localhost:9099"); // Auth Emulator default port
+                    const dbInstanceForEmulator = getFirestore(app); 
+                    connectFirestoreEmulator(dbInstanceForEmulator, "localhost", 8082); // Firestore Emulator port (changed to 8082)
+                    // NEW: Storage Emulator connection
+                    const storageInstanceForEmulator = getStorage(app);
+                    connectStorageEmulator(storageInstanceForEmulator, "localhost", 9199); // Storage Emulator default port
+                    
+                    window.auth = authInstanceForEmulator;
+                    window.db = dbInstanceForEmulator;
+                    window.storage = storageInstanceForEmulator; // NEW: Assign to global
+                    //window.analytics = getAnalytics(app); 
+                    console.log("[Firebase Init] Connected to Firebase Emulators!");
+                } else {
+                    // --- If not on localhost, connect to production Firebase ---
+                    window.auth = getAuth(app);
+                    // Explicitly set persistence to 'local' for production environment
+                    await setPersistence(window.auth, browserLocalPersistence); // <--- ADD THIS LINE                    
+                    window.db = getFirestore(app);
+                    // window.analytics = getAnalytics(app);
+                    window.storage = getStorage(app); // NEW: Assign to global for production
+                }
+
+                setLogLevel('debug');
+                console.log("[Firebase Init] Firebase initialized. Establishing initial user state...");
+
+                // --- Establish initial authentication state (e.g., anonymous) ---
+                // This happens *before* the onAuthStateChanged listener is fully set up
+                if (!window.auth.currentUser) { 
+                    console.log("[Auth Init] No user found on load. Attempting initial sign-in...");
+                    const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                    if (initialAuthToken) {
+                        try {
+                            await signInWithCustomToken(window.auth, initialAuthToken);
+                            console.log("[Auth Init] Initial sign-in: Custom token successful.");
+                        } catch (e) {
+                            console.error("[Auth Init] Initial sign-in: Custom token failed:", e);
+                        }
+                    } else {
+                        try {
+                            await signInAnonymously(window.auth);
+                            console.log("[Auth Init] Initial sign-in: Anonymous successful.");
+                        } catch (e) {
+                            console.error("[Auth Init] Initial sign-in: Anonymous failed:", e);
+                        }
+                    }
+                } else {
+                    console.log("[Auth Init] User already authenticated:", window.auth.currentUser.uid);
+                }
+
+                // --- Set up the onAuthStateChanged listener to react to *any* state changes ---
+                onAuthStateChanged(window.auth, async (user) => {
+                    console.log("[Auth State] onAuthStateChanged fired. Current user:", user ? user.uid : "null");
+
+                    const userDisplay = document.getElementById('user-display');
+                    const userIdDisplay = document.getElementById('user-id-display');
+                    const microsoftSignInButton = document.getElementById('microsoft-sign-in-button'); // <--- UPDATED
+                    const signOutButton = document.getElementById('sign-out-button');
+
+                    if (user) {
+                        window.userId = user.uid;
+                        console.log(`[Auth State] User signed in with UID: ${user.uid}`);
+                        
+                        if (userDisplay) userDisplay.textContent = user.displayName || user.email || 'Anonymous User';
+                        if (userIdDisplay) {
+                            userIdDisplay.textContent = user.uid;
+                            userIdDisplay.classList.remove('text-red-600', 'text-gray-500'); 
+                            userIdDisplay.classList.add('text-green-600'); 
+                        }
+                        
+                        // --- REVISED: Show/Hide Auth Buttons ---
+                        if (user.isAnonymous) {
+                            // If user is anonymous, show Microsoft Sign-in button to allow upgrading
+                            if (microsoftSignInButton) microsoftSignInButton.classList.remove('hidden'); // <--- UPDATED
+                            // Always show Sign Out button if any user is present
+                            if (signOutButton) signOutButton.classList.remove('hidden');
+                        } else {
+                            // If user is NOT anonymous (e.g., Microsoft signed-in user), hide Microsoft Sign-in button
+                            if (microsoftSignInButton) microsoftSignInButton.classList.add('hidden'); // <--- UPDATED
+                            // Always show Sign Out button
+                            if (signOutButton) signOutButton.classList.remove('hidden');
+                        }
+
+                        // Fetch user roles after a user is confirmed signed in
+                        await fetchUserRoles(user.uid); 
+                    } else {
+                        window.userId = null;
+                        window.userRoles = { isAdmin: false, isSupervisor: false }; // Reset roles
+                        console.log("[Auth State] No user signed in (or sign-out occurred).");
+                        
+                        if (userDisplay) userDisplay.textContent = 'None';
+                        if (userIdDisplay) {
+                            userIdDisplay.textContent = 'N/A';
+                            userIdDisplay.classList.remove('text-green-600');
+                            userIdDisplay.classList.add('text-gray-500');
+                        }
+                        // Reset roles display as well
+                        const rolesDisplay = document.getElementById('user-roles-display');
+                        if (rolesDisplay) rolesDisplay.textContent = 'None';
+                        
+                        // Show/Hide Auth Buttons
+                        if (microsoftSignInButton) microsoftSignInButton.classList.remove('hidden'); // <--- UPDATED
+                        if (signOutButton) signOutButton.classList.add('hidden');
+
+                        updateUIAccess(); // Update UI for non-authenticated state (hide admin/supervisor buttons)
+                        // Force anonymous sign-in only if no user is found by onAuthStateChanged
+                        try {
+                            await signInAnonymously(window.auth);
+                            console.log("[Auth Init] Forced anonymous sign-in after no persisted user found.");
+                        } catch (e) {
+                            console.error("[Auth Init] Forced anonymous sign-in failed:", e);
+                        }                        
+                    }
+                });
+
+            } catch (error) {
+                console.error("[Firebase Init] Firebase initialization failed:", error);
+                const userIdDisplay = document.getElementById('user-id-display');
+                if (userIdDisplay) {
+                    userIdDisplay.textContent = 'Connection Error';
+                    userIdDisplay.classList.remove('text-gray-500');
+                    userIdDisplay.classList.add('text-red-600');
+                }
+            }
+        }
+        
+        // --- Authentication Handler Functions ---
+        async function handleMicrosoftSignIn() {
+            const provider = new OAuthProvider('microsoft.com'); // Use Microsoft OAuthProvider
+            // --- IMPORTANT CHANGE: Specify the tenant domain ---
+            // This tells Firebase to use the tenant-specific endpoint instead of /common
+            provider.setCustomParameters({
+              tenant: 'kingdomlifeministriesbb.com' // Use your organization's domain
+              // Alternatively, you could use the Directory ID:
+              // tenant: 'c9e1fae6-5cb3-4fad-bb2e-af43c5f604c6'
+            });
+            // --- END IMPORTANT CHANGE ---
+
+            // (Optional: If you need specific scopes beyond basic profile)
+            // provider.addScope('mail.read');
+            // provider.addScope('calendars.read');
+            try {
+                const result = await signInWithPopup(window.auth, provider);
+                console.log("[Auth] Microsoft Sign-in successful!", result.user);
+                // Optional: Access Microsoft-specific data
+                // const credential = OAuthProvider.credentialFromResult(result);
+                // const accessToken = credential.accessToken;
+                // console.log("Microsoft Access Token:", accessToken);                
+            } catch (error) {
+                console.error("[Auth] Microsoft Sign-in failed:", error.code, error.message);
+                if (error.code === 'auth/popup-closed-by-user') {
+                    console.log("[Auth] Sign-in popup closed by user.");
+                }
+            }
+        }
+
+        async function handleSignOut() {
+            try {
+                await signOut(window.auth);
+                console.log("[Auth] User signed out.");
+            } catch (error) {
+                console.error("[Auth] Sign-out failed:", error);
+            }
+        }
+
+
+        // --- DOM Ready Event Listener (Attaches other event listeners and initializes UI) ---
+        document.addEventListener('DOMContentLoaded', () => {
+            const microsoftSignInButton = document.getElementById('microsoft-sign-in-button'); // Renamed ID for clarity
+            const signOutButton = document.getElementById('sign-out-button');
+            
+            if (microsoftSignInButton) {
+            microsoftSignInButton.addEventListener('click', handleMicrosoftSignIn); // Call the new function
+            }
+            if (signOutButton) {
+                signOutButton.addEventListener('click', handleSignOut);
+            }
+
+            // This part was window.addEventListener('load', ...) in your original code
+            window.addRow(); // Start with one row
+            window.updateSummary();
+            // Start in claimant mode (approver fields disabled)
+            document.querySelectorAll('#approver-authorization input').forEach(i => i.disabled = true);
+            document.getElementById('submission-date-input').value = new Date().toISOString().slice(0, 10);
+
+            // --- MODIFICATION: Auto-populate auth dates on signature ---
+            const today = new Date().toISOString().slice(0, 10);
+
+            const claimantSigInput = document.getElementById('claimant-signature');
+            const claimantDateInput = document.getElementById('claimant-auth-date');
+            
+            // Add event listener to claimant signature
+            if (claimantSigInput && claimantDateInput) {
+                claimantSigInput.addEventListener('input', () => {
+                   // If user types in signature box and date is empty, set date
+                   if (claimantSigInput.value.length > 0 && !claimantDateInput.value) {
+                       claimantDateInput.value = today;
+                   }
+                });
+            }
+
+            const approverSigInput = document.getElementById('approver-signature');
+            const approverDateInput = document.getElementById('approver-auth-date');
+
+            // Add event listener to approver signature
+            if (approverSigInput && approverDateInput) {
+                approverSigInput.addEventListener('input', () => {
+                   // If user types in signature box and date is empty, set date
+                   if (approverSigInput.value.length > 0 && !approverDateInput.value) {
+                       approverDateInput.value = today;
+                   }
+                });
+            }
+            // --- End of modification ---
+        });
+
+
+        // --- Final Call to Initialize Firebase ---
+        // This must be the very last executable line in your script block
+        initializeFirebase();
+    </script>
+    
+    <style>
+        /* Responsive adjustments for expense row readability on smaller screens */
+        @media (max-width: 768px) {
+            .grid-cols-12 {
+                 /* Stack on small screens for better input usability */
+                grid-template-columns: 1fr; 
+                gap: 0.75rem;
+            }
+            .expense-row > div {
+                min-width: 100%;
+            }
+            /* Hide the column header on mobile for cleaner look, but retain actions */
+            .expense-header {
+                display: none;
+            }
+        }
+        /* Style for disabled inputs to show they are locked */
+        input:disabled {
+            background-color: #f3f4f6; /* Tailwind gray-100 */
+            cursor: not-allowed;
+            border-style: dashed;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 font-sans p-4 md:p-8">
+
+<!-- Add this navigation bar at the top of your <body> -->
+    <nav class="bg-primary-purple p-4 shadow-lg text-white flex justify-center space-x-6 mb-8 rounded-b-lg">
+        <a href="/" class="text-white hover:text-gray-200 text-lg font-semibold transition duration-150 ease-in-out">Home</a>
+        <a href="/reimbursement-hub" class="text-white hover:text-gray-200 text-lg font-semibold transition duration-150 ease-in-out">Reimbursement Hub</a>
+        <a href="/cash-deposits" class="text-white hover:text-gray-200 text-lg font-semibold transition duration-150 ease-in-out">Cash Deposits</a>
+    </nav>
+
+    <!-- Custom Modal/Alert Box -->
+    <div id="alert-modal-container" class="hidden fixed inset-0 flex items-center justify-center z-50 p-4 bg-black bg-opacity-40">
+        <div class="bg-white p-6 rounded-xl shadow-2xl w-full max-w-sm"> <!-- Content is dynamically styled by alertBox() -->
+            <h3 id="alert-title" class="text-xl font-bold mb-3 text-gray-800"></h3>
+            <p id="alert-message" class="text-gray-600 mb-6"></p>
+            <button id="alert-button"></button>
+        </div>
+    </div>
+
+
+    <div class="max-w-4xl mx-auto bg-white p-6 md:p-10 rounded-xl shadow-2xl border border-primary-purple/20">
+        
+        <header class="mb-8 border-b-2 border-primary-purple/50 pb-4 text-center">
+            <img src="https://i.imgur.com/aq89VGO.png" alt="KLM Logo" class="h-24 w-auto mx-auto mb-3 rounded-md shadow-lg" onerror="this.onerror=null;this.src='https://placehold.co/100x100/7E22CE/ffffff?text=KLM+Finance';">
+            <h1 class="text-3xl font-bold text-primary-purple">KLM Reimbursement Hub</h1>
+            
+            <!-- User Authentication/Info Display -->
+            <div class="mt-4 space-y-1">
+                <p class="text-xs text-gray-500 font-medium">Current User: <span id="user-display">None</span></p>
+                <p class="text-xs text-gray-500 mt-2 font-medium break-all">User ID: <span id="user-id-display">Connecting...</span></p>
+                <p id="user-roles-display" class="text-sm font-semibold text-primary-purple/80 mt-1">Your Roles: Loading...</p>
+                
+                <!-- Auth Buttons -->
+                <div class="flex justify-center space-x-2 mt-3">
+                     <button id="microsoft-sign-in-button" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded text-sm">
+                        Sign In with Microsoft
+                    </button>
+                    <button id="sign-out-button" class="bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded text-sm hidden">
+                        Sign Out
+                    </button>
+                </div>
+            </div>
+            
+            <!-- SECURE ROLE-BASED ACCESS BUTTONS -->
+            <div class="flex justify-center space-x-2 mt-3">
+                 <button id="admin-access-button" onclick="window.toggleAdminPanel()" class="hidden text-xs text-primary-purple/80 hover:text-primary-purple px-3 py-1 rounded-lg bg-gray-100/50 hover:bg-gray-200 shadow-md">Admin Access</button>
+                 <button id="supervisor-access-button" onclick="window.toggleSupervisorPanel()" class="hidden text-xs text-primary-purple/80 hover:text-primary-purple px-3 py-1 rounded-lg bg-gray-100/50 hover:bg-gray-200 shadow-md">Leadership Approval</button>
+            </div>
+        </header>
+        
+        <!-- ADMIN MANAGEMENT PANEL (Hidden by Default, role-gated) -->
+        <div id="admin-management-panel" class="hidden mb-8 p-4 bg-yellow-50 border border-yellow-300 rounded-xl shadow-lg">
+            <h2 class="text-xl font-bold text-yellow-800 mb-3 border-b border-yellow-300 pb-2">Ministry Finance Management</h2>
+            <p id="bulk-report-count" class="text-md font-semibold text-gray-700 mb-4">Loading...</p>
+            <button id="bulk-export-button" onclick="window.loadAllReportsAndExport()" class="w-full bg-yellow-500 text-gray-800 font-bold py-3 px-4 rounded-lg shadow-xl hover:bg-yellow-600">Download All Claims</button>
+            <button id="single-export-button" onclick="window.exportSingleToCSV()" class="hidden mt-4 w-full bg-yellow-500 text-gray-800 font-bold py-2 px-4 rounded-lg shadow-lg hover:bg-yellow-600">Export Loaded Claim to CSV</button>
+        
+            <!-- NEW: User Role Management (Admin only) -->
+            <div class="mt-6 pt-4 border-t border-yellow-400">
+                <h3 class="text-lg font-bold text-yellow-800 mb-2">User Role Management</h3>
+                <p class="text-xs text-gray-600 mb-2">Enter a User ID below to grant or revoke roles.</p>
+                <input type="text" id="role-target-user-id" placeholder="Enter User ID to manage" class="w-full p-2 border border-gray-300 rounded-lg mb-2">
+                <div class="grid grid-cols-2 gap-2 text-sm">
+                    <button onclick="grantRole(document.getElementById('role-target-user-id').value, 'admin', true)" class="bg-blue-500 text-white p-2 rounded-lg hover:bg-blue-600">Make Admin</button>
+                    <button onclick="grantRole(document.getElementById('role-target-user-id').value, 'admin', false)" class="bg-gray-400 text-white p-2 rounded-lg hover:bg-gray-500">Remove Admin</button>
+                    <button onclick="grantRole(document.getElementById('role-target-user-id').value, 'supervisor', true)" class="bg-green-500 text-white p-2 rounded-lg hover:bg-green-600">Make Supervisor</button>
+                    <button onclick="grantRole(document.getElementById('role-target-user-id').value, 'supervisor', false)" class="bg-gray-400 text-white p-2 rounded-lg hover:bg-gray-500">Remove Supervisor</button>
+                </div>
+            </div>
+
+            <!-- NEW: All User Roles Display Section -->
+            <div class="mt-6 pt-4 border-t border-yellow-400"></div> 
+                <h3 class="text-lg font-bold text-yellow-800 mb-2">All User Roles Overview</h3>
+                <ul id="all-user-roles-list" class="bg-white p-3 rounded-lg shadow-inner max-h-60 overflow-y-auto">
+                    <!-- Roles will be loaded here by JavaScript -->
+                    <li class="text-gray-500">No roles loaded. Open Admin Panel to load.</li> 
+                </ul>
+                <button onclick="window.loadAllUserRoles()" class="mt-3 w-full bg-gray-200 text-gray-800 text-sm font-semibold py-2 px-3 rounded-lg hover:bg-gray-300">Refresh All Roles</button>
+        </div>
+
+        <!-- Report Control: Load, New, and ID Display -->
+        <div class="mb-8 p-4 bg-primary-purple/10 rounded-xl border border-primary-purple/50 space-y-3">
+             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label for="report-id-load-input" class="block text-sm font-medium text-gray-700">Load Report by ID (Pastor/Financial Advisor)</label>
+                    <div class="flex space-x-2 mt-1">
+                        <input type="text" id="report-id-load-input" placeholder="e.g., KLM-1706854215" class="flex-grow p-2 border border-gray-300 rounded-lg uppercase" onkeydown="if(event.key === 'Enter') loadReportById()">
+                        <button id="load-report-button" onclick="window.loadReportById()" class="bg-primary-purple/80 text-white px-3 py-2 rounded-lg text-sm font-semibold hover:bg-primary-purple">Load Report</button>
+                    </div>
+                </div>
+                <div class="flex flex-col justify-end space-y-2">
+                     <p id="report-id-display" class="p-2 text-center text-sm text-gray-700 rounded-lg border border-dashed border-gray-300">No active report loaded.</p>
+                    <button onclick="window.clearForm()" class="bg-gray-200 text-gray-800 text-sm font-semibold py-2 px-3 rounded-lg hover:bg-gray-300">Start New Report</button>
+                </div>
+            </div>
+        </div>
+        
+        <form id="reimbursement-form">
+            <!-- Claimant Information -->
+            <h2 class="text-xl font-bold text-primary-purple mb-4 border-b">Claimant Information</h2>
+            <div class="space-y-4 mb-8">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label for="claimant-name-input" class="block text-sm font-medium">Claimant Name</label>
+                        <input type="text" id="claimant-name-input" placeholder="Enter your full name" class="w-full mt-1 p-2 border rounded-lg">
+                    </div>
+                    <div>
+                        <label for="email-input" class="block text-sm font-medium">Email</label>
+                        <input type="email" id="email-input" placeholder="your.email@church.org" class="w-full mt-1 p-2 border rounded-lg">
+                    </div>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label for="claim-period-input" class="block text-sm font-medium">Claim Period</label>
+                        <input type="text" id="claim-period-input" placeholder="e.g., Jan 1 - Jan 31, 2025" class="w-full mt-1 p-2 border rounded-lg">
+                    </div>
+                    <div>
+                        <label for="submission-date-input" class="block text-sm font-medium">Date of Submission</label>
+                        <input type="date" id="submission-date-input" class="w-full mt-1 p-2 border rounded-lg">
+                    </div>
+                </div>
+            </div>
+            
+            <div class="p-4 rounded-xl bg-primary-purple/10 border border-primary-purple mb-6">
+                <h3 class="text-lg font-bold text-primary-purple flex items-center">Important: Recording advances</h3>
+                <ul class="list-disc list-inside mt-2 text-sm text-gray-700 space-y-1 ml-4">
+                    <li>For <strong class="font-semibold text-primary-purple">Expenses</strong> (Money YOU Spent), enter a <strong class="font-semibold text-primary-purple">positive amount</strong> (e.g., 50.00).</li>
+                    <li>For <strong class="font-semibold text-primary-purple">Cash Advances</strong> (Money YOU Received), enter a <strong class="font-semibold text-primary-purple">negative amount</strong> (e.g., -500.00).</li>
+                </ul>
+            </div>
+    
+            <h2 class="text-xl font-bold text-primary-purple mb-4 border-b">Expense Details</h2>
+            <div class="expense-header hidden md:grid grid-cols-12 gap-3 mb-2 px-3 py-2 text-xs font-bold text-white bg-primary-purple rounded-lg">
+                <div class="col-span-2">Date</div><div class="col-span-3">Vendor</div><div class="col-span-2">Purpose</div><div class="col-span-2 text-center">Amount ($)</div><div class="col-span-2 text-center">Receipt</div><div class="col-span-1 text-center">Actions</div>
+            </div>
+    
+            <div id="expenses-container" class="space-y-3"></div>
+    
+            <button type="button" onclick="window.addRow()" class="mt-4 w-full flex items-center justify-center space-x-2 bg-primary-purple text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-purple/90"><span>Add Expense Line</span></button>
+    
+            <hr class="my-8 border-primary-purple/30">
+    
+            <h2 class="text-xl font-bold text-primary-purple mb-4 border-b">Summary</h2>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div class="md:col-span-2 bg-white p-5 rounded-xl border border-primary-purple/50">
+                    <div class="space-y-3">
+                        <div class="flex justify-between items-center text-lg"><span class="font-semibold">Total Amount Claimed:</span><span id="total-amount-claimed" class="text-xl font-extrabold text-primary-purple">$0.00</span></div>
+                        <div class="flex justify-between items-center text-lg italic"><span class="text-gray-600">Less: Cash Advance:</span><span class="text-xl text-red-600 font-mono">- $<span id="total-cash-advance-less">0.00</span></span></div>
+                        <div class="flex justify-between items-center pt-3 border-t-2 border-primary-purple/50"><span class="text-xl font-bold">Total Amount Due:</span><span id="total-amount-due" class="text-2xl font-extrabold">$0.00</span></div>
+                    </div>
+                </div>
+                <div class="md:col-span-1 flex flex-col space-y-3 justify-center">
+                    <button id="save-share-button" type="button" onclick="window.saveAndShareReport()" class="w-full bg-green-500 text-white font-bold py-3 px-4 rounded-lg shadow-xl hover:bg-green-600 text-lg">Save & Share Report</button>
+                    <span class="text-xs text-gray-500 text-center">Claimant saves; Pastor/Advisor loads.</span>
+                </div>
+            </div>
+    
+            <hr class="my-8 border-primary-purple/30">
+            
+            <!-- SUPERVISOR/APPROVER PANEL (Hidden by Default) -->
+            <div id="supervisor-panel" class="hidden mb-6 p-3 bg-gray-100 rounded-lg shadow-inner border">
+                <div class="flex items-center justify-between">
+                    <p id="mode-status" class="text-sm text-gray-700 italic font-semibold">Claimant Mode</p>
+                    <button id="approver-mode-toggle" type="button" onclick="window.toggleApproverMode()" class="bg-gray-200 text-gray-800 text-sm font-semibold py-1 px-3 rounded-lg hover:bg-gray-300">Enter Approval Mode</button>
+                </div>
+            </div>
+
+            <h2 class="text-xl font-bold text-primary-purple mb-4 border-b">Authorization</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <div id="claimant-authorization" class="space-y-4">
+                    <label for="claimant-signature" class="block text-md font-medium">Claimant Signature/Name</label>
+                    <input type="text" id="claimant-signature" placeholder="Type your name (E-Signature)" class="w-full p-2 border rounded-lg">
+                    <label for="claimant-auth-date" class="block text-md font-medium mt-4">Date</label>
+                    <input type="date" id="claimant-auth-date" class="w-full mt-1 p-2 border rounded-lg">
+                </div>
+                <div id="approver-authorization" class="space-y-4">
+                    <label for="approver-signature" class="block text-md font-medium">Approved By (<strong class="font-bold">Pastor/Financial Advisor</strong>)</label>
+                    <input type="text" id="approver-signature" disabled placeholder="Enable Approval Mode to sign" class="w-full p-2 border rounded-lg">
+                    <label for="approver-auth-date" class="block text-md font-medium mt-4">Date</label>
+                    <input type="date" id="approver-auth-date" disabled class="w-full mt-1 p-2 border rounded-lg">
+                </div>
+            </div>
+        </form>
+
+    </div>
+</body>
+</html>

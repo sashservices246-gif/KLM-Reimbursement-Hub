@@ -1,0 +1,137 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // --- Helper Functions for Role Checking ---
+    function getUserRole(roleName, appId) {
+      return request.auth != null &&
+             exists(/databases/$(database)/documents/artifacts/$(appId)/public/data/roles/$(request.auth.uid)) &&
+             get(/databases/$(database)/documents/artifacts/$(appId)/public/data/roles/$(request.auth.uid)).data[roleName] == true;
+    }
+
+    function isAdmin(appId) {
+      return getUserRole('isAdmin', appId);
+    }
+
+    function isSupervisor(appId) {
+      return getUserRole('isSupervisor', appId);
+    }
+
+    // --- New Helper Function: Detects if the current update is an "approval" action ---
+    // An approval action is when the approverSignature field is changed from empty to non-empty.
+    function isApprovalAction() {
+      // DEFENSIVE CHECKS ADDED:
+      // 1. Ensure 'authorization' field exists in both new and old data.
+      // 2. Ensure 'approverSignature' sub-field exists within 'authorization' in both.
+      return ('authorization' in request.resource.data) &&
+             ('approverSignature' in request.resource.data.authorization) && // NEW: Check for sub-field
+             ('authorization' in resource.data) &&
+             ('approverSignature' in resource.data.authorization) &&       // NEW: Check for sub-field
+             // Now safely access properties:
+             request.resource.data.authorization.approverSignature != '' &&
+             resource.data.authorization.approverSignature == '';
+    }
+
+    // REVISED HELPER FUNCTION: Validates the structure and content of the authorization map
+    // This function must be a single boolean expression for Firebase Security Rules syntax.
+    function isValidAuthorization(authData) {
+      // Logic:
+      // authData must be a map, AND all expected sub-fields must be present AND of the correct type,
+      // before proceeding to check their content (size, matches).
+      return authData is map &&
+             ('approverSignature' in authData) && authData.approverSignature is string &&
+             ('approverAuthDate' in authData) && authData.approverAuthDate is string &&
+             ('claimantSignature' in authData) && authData.claimantSignature is string &&
+             ('claimantAuthDate' in authData) && authData.claimantAuthDate is string &&
+             (
+               // Case 1: Report is entirely unapproved (all fields are empty)
+               (
+                 authData.approverSignature.size() == 0 && authData.approverAuthDate.size() == 0 &&
+                 authData.claimantSignature.size() == 0 && authData.claimantAuthDate.size() == 0
+               ) ||
+               // Case 2: Report is Claimant Signed, Awaiting Approval
+               (
+                 authData.approverSignature.size() == 0 && authData.approverAuthDate.size() == 0 &&
+                 authData.claimantSignature.size() > 0 && authData.claimantAuthDate.size() > 0 &&
+                 authData.claimantAuthDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+               ) ||
+               // Case 3: Report is fully approved (all fields are non-empty and valid)
+               (
+                 authData.approverSignature.size() > 0 && authData.approverAuthDate.size() > 0 &&
+                 authData.approverAuthDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$') &&
+                 authData.claimantSignature.size() > 0 && authData.claimantAuthDate.size() > 0 &&
+                 authData.claimantAuthDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+               )
+             );
+    }
+
+    // --- Global Authentication Requirement ---
+    allow read, write: if request.auth != null;
+
+
+    // --- Rules for the 'reports' collection ---
+    match /artifacts/{appId}/public/data/reports/{reportId} {
+      allow create: if request.auth != null && (
+          // Condition 1: User creates their own report (original functionality)
+          (
+            request.auth.uid == request.resource.data.submittedByUserId &&
+            !('proxySubmitterId' in request.resource.data)
+          ) ||
+          // Condition 2: Admin/Supervisor creates a report for *another* user (proxy path)
+        (
+            (isAdmin(appId) || isSupervisor(appId)) &&
+            request.resource.data.submittedByUserId != request.auth.uid &&
+            request.resource.data.proxySubmitterId == request.auth.uid &&
+            request.resource.data.submittedByUserId is string &&
+            request.resource.data.proxySubmitterId is string
+        )
+      ) &&
+      request.resource.data.amount is number &&
+      request.resource.data.description is string && request.resource.data.description.size() > 0 &&
+      // NEW: Defensive Authorization field validation - call isValidAuthorization only if the field exists
+      (
+          !('authorization' in request.resource.data) || // If authorization field is absent, it's valid for this condition
+          isValidAuthorization(request.resource.data.authorization) // Otherwise, validate it
+      );
+     
+      allow read: if request.auth != null && (request.auth.uid == resource.data.submittedByUserId || isSupervisor(appId) || isAdmin(appId));
+
+      // --- CRITICAL FIX FOR ALLOW UPDATE ---
+      allow update: if request.auth != null && (
+          // Condition 1: Claimant updates their own report
+          (request.auth.uid == resource.data.submittedByUserId && !isApprovalAction()) || // isApprovalAction is now defensive
+          // Condition 2: Supervisor/Admin updates any report
+          ((isSupervisor(appId) || isAdmin(appId)) &&
+            (!isApprovalAction() || request.auth.uid != resource.data.submittedByUserId) // isApprovalAction is now defensive
+          )
+      ) &&
+      request.resource.data.amount is number &&
+      request.resource.data.description is string && request.resource.data.description.size() > 0 &&
+
+      // NEW: Defensive Authorization field validation - call isValidAuthorization only if the field exists
+      (
+          !('authorization' in request.resource.data) || // If authorization field is absent, it's valid (for updates not involving auth)
+          isValidAuthorization(request.resource.data.authorization) // Otherwise, validate it
+      );
+
+      allow delete: if request.auth != null && isAdmin(appId);
+      // --- NEW RULE: Allow authenticated users to create email requests
+      // in the 'mail' subcollection of their own reports ---
+      match /mail/{emailDocumentId} {
+        allow create: if request.auth != null &&
+                         request.auth.uid == get(/databases/$(database)/documents/artifacts/$(appId)/public/data/reports/$(reportId)).data.submittedByUserId;
+        // Optionally, restrict read/delete of mail docs if needed, e.g., only by admins
+        // allow read: if isAdmin(appId);
+        // allow delete: if isAdmin(appId);
+      }
+    }
+
+
+    // --- Rules for the 'roles' collection ---
+    match /artifacts/{appId}/public/data/roles/{userId} {
+      allow read: if request.auth != null && (request.auth.uid == userId || isAdmin(appId));
+      allow create, update, delete: if request.auth != null && isAdmin(appId);
+    }
+
+  }
+}
